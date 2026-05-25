@@ -1,0 +1,237 @@
+{
+  "envelopes": [
+    {
+      "v": 1,
+      "sid": "sess-1",
+      "from": "agent",
+      "ch": "terminal",
+      "seq": 0,
+      "ts": 1700000000,
+      "notify": null,
+      "encryptedHex": "01020304fa00ff",
+      "msgpackHex": "87a17601a3736964a6736573732d31a466726f6da56167656e74a26368a87465726d696e616ca373657100a27473ce6553f100a9656e63727970746564c40701020304fa00ff"
+    },
+    {
+      "v": 1,
+      "sid": "sess-2",
+      "from": "app",
+      "ch": "files",
+      "seq": 7,
+      "ts": 1700000099,
+      "notify": "permission_needed",
+      "encryptedHex": "090807",
+      "msgpackHex": "88a17601a3736964a6736573732d32a466726f6da3617070a26368a566696c6573a373657107a27473ce6553f163a66e6f74696679b17065726d697373696f6e5f6e6565646564a9656e63727970746564c403090807"
+    }
+  ],
+  "symmetric": {
+    "keyHex": "4fb9224d6f32ff2445c48df20acf6327e89584bc87d40d15eacbec097cce731d",
+    "cases": [
+      {
+        "plaintext": "hello 世界",
+        "sealedHex": "54446caf7ef2120b819c8f62eccd02be7b5191bb5f9f8fc330359ffa3d0316ca02d3d61b513f937206b1e6882d3bbd2d05ba104040d9"
+      },
+      {
+        "plaintext": 42,
+        "sealedHex": "e885b74518a462a79fca47676f5c9a72ba8af249277ce6cd8ff6a0091286d6eda122307670bdcfadd86e"
+      },
+      {
+        "plaintext": true,
+        "sealedHex": "d61615ed5cf70ef7dda89092c9f08c42f8af0d9f63a6f5b088d4d4f9d2135a71d7b994b5dbc197764c6f79ac"
+      }
+    ]
+  },
+  "box": {
+    "agentPubHex": "fa41fd1d9a449ad682b7599dcf1f674b0eb5628d13ba4b28841fc6125f7c7c1b",
+    "agentSecHex": "0c05f042c051193c615dcc0a055f656a1d6bcc9ed4d11c627f598da2c97f5741",
+    "appPubHex": "b213c6a42c1bd55d918456b9493d1e6072335180e061bf54cb80c256dd51aa33",
+    "appSecHex": "4469b03754c434228a6a6a18871afcc2fbdefbf666155dceb1e8885fff33c0cb",
+    "kHex": "71c5da0cf0242d33fea60fdf4e38066a9a8617b611ef8f845000840b86a50380",
+    "wrappedHex": "cd339b41842ba29e2837187cb3de24990c1e7c265917f4ad92b161007a67a6634e92c167132c268e8b8c11986f21588f31f8425b2adc50745c949085a1a9b25cb4d1187a40e18ccb"
+  },
+  "sas": {
+    "agentPubHex": "fa41fd1d9a449ad682b7599dcf1f674b0eb5628d13ba4b28841fc6125f7c7c1b",
+    "appPubHex": "b213c6a42c1bd55d918456b9493d1e6072335180e061bf54cb80c256dd51aa33",
+    "sas": "627525"
+  },
+  "commit": {
+    "pubHex": "fa41fd1d9a449ad682b7599dcf1f674b0eb5628d13ba4b28841fc6125f7c7c1b",
+    "saltHex": "80a567f9be84dd5dfccb68a041af2bc6",
+    "commitHex": "874d3a136bfd91ddc715bc829d80160ad9c0cce115c6eb8f597c92b007c17b02"
+  },
+  "tunnel": {
+    "inputs": [
+      {
+        "type": "http_request",
+        "id": "req-1",
+        "method": "GET",
+        "port": 3000,
+        "path": "/"
+      },
+      {
+        "type": "http_request",
+        "id": "req-2",
+        "method": "POST",
+        "port": 8080,
+        "path": "/api/data",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyBase64": "eyJuYW1lIjoiZm9vIn0="
+      },
+      {
+        "type": "refresh_ports"
+      }
+    ],
+    "outputs": [
+      {
+        "type": "port_list",
+        "ports": [
+          {
+            "port": 3000,
+            "pid": 12345,
+            "process": "node"
+          },
+          {
+            "port": 8080,
+            "pid": 5678,
+            "process": "python",
+            "cmdline": "python -m http.server 8080"
+          }
+        ]
+      },
+      {
+        "type": "http_response",
+        "id": "req-1",
+        "status": 200,
+        "statusText": "OK",
+        "headers": {
+          "Content-Type": "text/html"
+        },
+        "bodyBase64": "PGh0bWw+SGVsbG88L2h0bWw+"
+      },
+      {
+        "type": "http_error",
+        "id": "req-3",
+        "code": "connection_refused",
+        "message": "Port 4000 is not listening"
+      }
+    ]
+  },
+  "files": {
+    "inputs": [
+      {
+        "type": "ls",
+        "id": "files-1",
+        "path": "."
+      },
+      {
+        "type": "ls",
+        "id": "files-2",
+        "path": "src",
+        "showHidden": true
+      },
+      {
+        "type": "read",
+        "id": "files-3",
+        "path": "README.md"
+      },
+      {
+        "type": "write",
+        "id": "files-4",
+        "path": "test.txt",
+        "contentBase64": "SGVsbG8gV29ybGQ="
+      },
+      {
+        "type": "mkdir",
+        "id": "files-5",
+        "path": "newdir",
+        "recursive": true
+      },
+      {
+        "type": "rm",
+        "id": "files-6",
+        "path": "old.txt"
+      },
+      {
+        "type": "mv",
+        "id": "files-7",
+        "src": "a.txt",
+        "dst": "b.txt"
+      },
+      {
+        "type": "stat",
+        "id": "files-8",
+        "path": "package.json"
+      },
+      {
+        "type": "search",
+        "id": "files-9",
+        "pattern": "*.ts",
+        "maxResults": 100
+      }
+    ],
+    "outputs": [
+      {
+        "type": "ls_result",
+        "id": "files-1",
+        "path": ".",
+        "entries": [
+          {
+            "name": "src",
+            "type": "dir",
+            "size": 0,
+            "mtime": 1700000000,
+            "mode": 493
+          },
+          {
+            "name": "package.json",
+            "type": "file",
+            "size": 1024,
+            "mtime": 1700000000,
+            "mode": 420
+          }
+        ]
+      },
+      {
+        "type": "read_result",
+        "id": "files-3",
+        "path": "README.md",
+        "contentBase64": "IyBQcm9qZWN0",
+        "size": 10,
+        "truncated": false
+      },
+      {
+        "type": "ok",
+        "id": "files-4",
+        "message": "File written successfully"
+      },
+      {
+        "type": "stat_result",
+        "id": "files-8",
+        "path": "package.json",
+        "entry": {
+          "name": "package.json",
+          "type": "file",
+          "size": 1024,
+          "mtime": 1700000000
+        }
+      },
+      {
+        "type": "search_result",
+        "id": "files-9",
+        "pattern": "*.ts",
+        "matches": [
+          "src/index.ts",
+          "src/utils.ts"
+        ],
+        "truncated": false
+      },
+      {
+        "type": "error",
+        "id": "files-10",
+        "code": "permission_denied",
+        "message": "Access denied: ~/.ssh/id_rsa"
+      }
+    ]
+  }
+}

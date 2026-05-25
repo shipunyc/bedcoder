@@ -1,0 +1,19 @@
+# Node / TS
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# pnpm
+.pnpm-store/
+
+# Go
+relay/bin/
+relay/bedcoder-relay
+relay/*.db
+
+# OS / editor
+.DS_Store
+*.log
+.idea/
+.vscode/

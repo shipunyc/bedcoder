@@ -1,0 +1,27 @@
+# fly.io deployment for the relay. Fly terminates TLS and gives you a
+# wss://<app>.fly.dev endpoint for free, which the web app needs.
+#
+#   fly launch --no-deploy        # once, to create the app
+#   fly secrets set BEDCODER_ALLOWED_ORIGINS=https://<your-app>.vercel.app
+#   fly deploy
+app = "bedcoder-relay"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  BEDCODER_ADDR = ":8787"
+  BEDCODER_DB = "/data/bedcoder.db"
+  # BEDCODER_ALLOWED_ORIGINS is set via `fly secrets set` (your Vercel origin).
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[mounts]]
+  source = "bedcoder_data"
+  destination = "/data"
