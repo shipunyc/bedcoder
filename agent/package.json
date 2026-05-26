@@ -1,6 +1,6 @@
 {
   "name": "bedcoder",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Headless daemon to drive Claude Code from your phone — pair, then relay the session end-to-end encrypted.",
   "keywords": [
     "claude",

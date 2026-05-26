@@ -163,6 +163,9 @@ export class ClaudeEngine implements AgentEngine {
     log('engine.start', { resume: this.config.resume, resumeAt: this.config.resumeSessionAt });
     const sdk = await import('@anthropic-ai/claude-agent-sdk');
     const query = sdk.query as unknown as QueryFn;
+    // Note: when running as root, the bundled CLI refuses --dangerously-skip-permissions
+    // unless IS_SANDBOX=1 is set in env. That env var is set (after user consent) at
+    // boot in index.ts#confirmRootSandbox and inherited here via process.env.
     this.stream = query({
       prompt: this.inputIterable(),
       options: {

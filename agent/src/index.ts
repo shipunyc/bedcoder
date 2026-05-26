@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
+import * as readline from 'node:readline';
 import { generateKey } from '@bedcoder/protocol';
 import { parseArgs } from './cli';
 import { RelayClient } from './transport/relay';
@@ -29,12 +30,65 @@ import {
   type TrackableMessage,
 } from './terminal';
 
+// The bundled Claude CLI refuses --dangerously-skip-permissions when launched
+// as root (uid 0) on Linux/macOS — exits 1 at boot — unless IS_SANDBOX=1 is set.
+// We always pass that SDK flag so the user can switch to 'auto' mode at runtime,
+// so as root, bedcoder simply won't start without the env var. Setting it bypasses
+// an intentional safety guard (root + auto = unconfirmed root commands on this
+// host), so we make the user opt in. Accepted -> mutate parent process.env;
+// child Claude CLI inherits it. Refused or no TTY -> exit.
+async function confirmRootSandbox(): Promise<void> {
+  const isRoot =
+    process.platform !== 'win32' &&
+    typeof process.getuid === 'function' &&
+    process.getuid() === 0;
+  if (!isRoot) return;
+
+  console.log('');
+  console.log('⚠️  Running as root (uid 0).');
+  console.log('');
+  console.log('To start, bedcoder must set IS_SANDBOX=1 on the Claude CLI subprocess.');
+  console.log('That bypasses a safety guard which normally refuses');
+  console.log('--dangerously-skip-permissions as root. If you later switch the phone to');
+  console.log('"auto" mode, Claude will be able to run any command on this host as root');
+  console.log('with no confirmation.');
+  console.log('');
+  console.log('Only accept if this is a sandboxed environment (container, VM, disposable');
+  console.log("VPS). Don't accept on a host you care about.");
+  console.log('');
+
+  if (!process.stdin.isTTY) {
+    console.error(
+      'No TTY available to confirm. Re-run with an interactive terminal, or run as a non-root user.',
+    );
+    process.exit(1);
+  }
+
+  const answer = await new Promise<string>((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question('Proceed? [y/N]: ', (a) => {
+      rl.close();
+      resolve(a);
+    });
+  });
+  const a = answer.trim().toLowerCase();
+  if (a !== 'y' && a !== 'yes') {
+    console.error('Aborted.');
+    process.exit(1);
+  }
+  process.env.IS_SANDBOX = '1';
+  log('root_sandbox_accepted', {});
+}
+
 // bedcoder — headless daemon entry (DESIGN §3). Shows a pairing code + QR and
 // relays the Claude session to the phone; renders no conversation locally.
 async function main(): Promise<void> {
   const config = parseArgs(process.argv.slice(2));
   if (config.log) enableLog(config.logPath); // off unless --log
   log('boot', { resume: config.resume });
+
+  // Root consent gate: must run before relay/QR so we don't connect-then-abort.
+  await confirmRootSandbox();
 
   // SDK file checkpointing (for /rewind code) is OPT-IN via --rewind-code: it
   // uses git "shadow repos" and can stall/kill the CLI subprocess on some setups
