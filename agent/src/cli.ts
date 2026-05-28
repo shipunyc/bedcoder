@@ -1,6 +1,8 @@
 // CLI argument parsing for `bedcoder` (DESIGN §3.1). Phase 1 supports the new
 // session, --resume, --relay, a --fake engine for testing without auth, and
 // --log to write a diagnostics file.
+import type { ProviderId } from './providers';
+
 export interface CliConfig {
   resume: boolean;
   resumeId?: string;
@@ -17,6 +19,13 @@ export interface CliConfig {
   // some setups (no git, non-repo cwd, slow/networked FS) — chat must not depend
   // on it. Requires git + a normal, writable project.
   rewindCode: boolean;
+  // Skip the startup SDK/CLI compatibility check (and its y/N prompts). Use when
+  // you know the warning doesn't apply (e.g., custom CLI build) or for scripted
+  // launches where you've already verified the versions.
+  skipVersionCheck: boolean;
+  // Force a specific AI provider backend (skip the interactive menu).
+  // --claude / --minimax / --glm / --deepseek are mutually exclusive.
+  provider?: ProviderId;
 }
 
 export const DEFAULT_RELAY_URL = 'wss://relay.bedcoder.org';
@@ -30,6 +39,7 @@ export function parseArgs(argv: string[]): CliConfig {
     log: false,
     modelsUrl: process.env.BEDCODER_MODELS_URL ?? DEFAULT_MODELS_URL,
     rewindCode: false,
+    skipVersionCheck: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -55,6 +65,24 @@ export function parseArgs(argv: string[]): CliConfig {
       case '--rewind-code':
         config.rewindCode = true;
         break;
+      case '--skip-version-check':
+        config.skipVersionCheck = true;
+        break;
+      case '--claude':
+      case '--minimax':
+      case '--glm':
+      case '--deepseek':
+      case '--openrouter': {
+        // Mutually exclusive — a second provider flag is a usage error.
+        const id = arg.slice(2) as ProviderId;
+        if (config.provider && config.provider !== id) {
+          throw new Error(
+            `--${id} conflicts with --${config.provider}; pick one provider flag`,
+          );
+        }
+        config.provider = id;
+        break;
+      }
       case '--log': {
         // Enable the diagnostics log → ~/.bedcoder/agent.log. A following non-flag
         // argument (`--log <path>`) overrides that file. Without --log, nothing

@@ -3,6 +3,7 @@ import type { AgentState, EffortLevel, RewindPoint, SessionMode } from '@bedcode
 import { log } from '../log';
 import {
   buildPermissionRequest,
+  contextLimitFor,
   mapSdkMessage,
   parseAgentStarts,
   percentUsed,
@@ -32,6 +33,44 @@ export function mapSessionModeToPermissionMode(mode: SessionMode): SdkPermission
     default:
       return 'default';
   }
+}
+
+// Derive a sensible per-tool rule pattern from the call's input, so "Always"
+// scopes the rule to *this kind of call* instead of the whole tool (e.g. allowing
+// any future Bash command). For tools we don't recognize, returning undefined
+// falls back to a tool-name-only rule.
+export function derivePattern(toolName: string, input: unknown): string | undefined {
+  const i = (input ?? {}) as Record<string, unknown>;
+  if (toolName === 'Bash' && typeof i.command === 'string') return i.command;
+  if (
+    typeof i.file_path === 'string' &&
+    (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write' || toolName === 'Read')
+  ) {
+    return i.file_path;
+  }
+  return undefined;
+}
+
+// Build the SDK's canUseTool result. "Always" attaches an updatedPermissions rule
+// (destination 'session', so it's not written to disk) — without this, the SDK
+// re-prompts on every matching call.
+export function buildPermissionResult(
+  toolName: string,
+  input: unknown,
+  decision: PermissionDecision,
+  pattern?: string,
+): { behavior: 'allow'; updatedInput: unknown; updatedPermissions?: unknown[] } | { behavior: 'deny'; message: string } {
+  if (decision === 'deny') return { behavior: 'deny', message: 'denied by user' };
+  const allow = { behavior: 'allow' as const, updatedInput: input };
+  if (decision !== 'always_allow') return allow;
+  const content = pattern ?? derivePattern(toolName, input);
+  const rule = content ? { toolName, ruleContent: content } : { toolName };
+  return {
+    ...allow,
+    updatedPermissions: [
+      { type: 'addRules', rules: [rule], behavior: 'allow', destination: 'session' },
+    ],
+  };
 }
 
 // Map an effort level to a thinking-token budget (null = let the model decide).
@@ -87,6 +126,7 @@ type Query = AsyncIterable<unknown> & {
   supportedModels?: () => Promise<SdkModelInfo[]>;
   supportedCommands?: () => Promise<SdkSlashCommand[]>;
   accountInfo?: () => Promise<Record<string, unknown>>;
+  getContextUsage?: () => Promise<{ percentage?: number; totalTokens?: number; maxTokens?: number }>;
 };
 type QueryFn = (params: { prompt: AsyncIterable<unknown>; options?: Record<string, unknown> }) => Query;
 
@@ -113,7 +153,9 @@ export class ClaudeEngine implements AgentEngine {
   private state: AgentState = 'idle';
   private readonly points: RewindPoint[] = [];
   private readonly seenPoints = new Set<string>();
-  private readonly permResolvers = new Map<string, (decision: PermissionDecision) => void>();
+  // Resolver carries both the decision and an optional pattern; the pattern
+  // narrows the persisted rule when the user picks "Always".
+  private readonly permResolvers = new Map<string, (r: { decision: PermissionDecision; pattern?: string }) => void>();
   private deltaBuf = ''; // streamed assistant text awaiting a coalesced flush
   private deltaTimer?: ReturnType<typeof setTimeout>;
   private readonly toolNames = new Map<string, string>(); // tool_use id → name, for tool_output labels/suppression
@@ -190,7 +232,16 @@ export class ClaudeEngine implements AgentEngine {
           log('claude.stderr', { text: text.slice(0, 2000) });
           process.stderr.write(`[claude] ${text}\n`);
         },
-        ...(this.config.resume ? { resume: this.config.sessionId } : {}),
+        // For NEW sessions we have to pin the session id via the bundled CLI's
+        // --session-id flag (the SDK Options type has no `sessionId` field for
+        // new sessions). Without this the SDK uuidgens its own id and the jsonl
+        // lands under that id instead of ours — breaking session interop with
+        // the official `claude --resume` (invariant 4 in CLAUDE.md). For resume
+        // we pass `resume: <id>` instead, which loads <id>.jsonl and keeps the
+        // same id (no fork unless forkSession is set).
+        ...(this.config.resume
+          ? { resume: this.config.sessionId }
+          : { extraArgs: { 'session-id': this.config.sessionId } }),
         ...(this.config.resumeSessionAt ? { resumeSessionAt: this.config.resumeSessionAt } : {}),
       },
     });
@@ -230,10 +281,16 @@ export class ClaudeEngine implements AgentEngine {
           }
           this.handler(out);
         }
-        // End-of-turn: report how full the context window is (best-effort).
+        // End-of-turn: refresh the context bar.
         if (msg.type === 'result') {
-          const pct = percentUsed(msg.usage, this.currentModel, msg.modelUsage);
-          if (pct !== undefined) this.handler({ type: 'context_status', usedPercent: pct });
+          void this.emitContextStatus(msg.usage, msg.modelUsage);
+        }
+        // /compact (or auto-compact) just finished. The compact's own `result`
+        // typically has zero `usage` (the CLI summarized in-memory, no fresh
+        // input was sent), so we can't reuse that path — ask the SDK directly,
+        // and fall back to compact_metadata.post_tokens if it can't answer.
+        if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+          void this.emitContextStatus(undefined, undefined, msg.compact_metadata?.post_tokens);
         }
       }
     } catch (err) {
@@ -294,11 +351,11 @@ export class ClaudeEngine implements AgentEngine {
     this.wake = undefined;
   }
 
-  respondPermission(requestId: string, decision: PermissionDecision): void {
+  respondPermission(requestId: string, decision: PermissionDecision, pattern?: string): void {
     const resolve = this.permResolvers.get(requestId);
-    log('perm.resp', { decision, found: resolve !== undefined });
+    log('perm.resp', { decision, hasPattern: !!pattern, found: resolve !== undefined });
     if (resolve) {
-      resolve(decision);
+      resolve({ decision, pattern });
       this.permResolvers.delete(requestId);
     }
   }
@@ -317,10 +374,16 @@ export class ClaudeEngine implements AgentEngine {
   }
 
   abort(): void {
-    log('abort', {});
+    log('abort', { pendingPerms: this.permResolvers.size });
     this.flushDelta(); // don't lose text streamed before the interrupt
     this.clearAgents();
     this.safeControl('abort.interrupt', () => this.stream?.interrupt?.());
+    // Resolve any pending permission promises as 'deny' — otherwise the SDK is
+    // deadlocked awaiting canUseTool from the aborted turn, and the next user
+    // message just sits in the queue. interrupt() stops generation; this frees
+    // the tool-call await so the turn can finalize and the SDK move on.
+    for (const resolve of this.permResolvers.values()) resolve({ decision: 'deny' });
+    this.permResolvers.clear();
     this.state = 'idle';
     this.emitStatus();
   }
@@ -425,6 +488,70 @@ export class ClaudeEngine implements AgentEngine {
     }
   }
 
+  // Ask the SDK for current context window usage. Used by the controller after
+  // /resume so the bar reflects the resumed session's real fill — without this,
+  // the bar would keep showing the previous session's value until the first new
+  // turn fires `result` and percentUsed. Returns undefined if the SDK can't
+  // answer (control request failed, no stream, older SDK without the method).
+  async getContextPercent(): Promise<number | undefined> {
+    const fn = this.stream?.getContextUsage;
+    if (!fn) return undefined;
+    try {
+      const r = await fn.call(this.stream);
+      const pct = r?.percentage;
+      if (typeof pct !== 'number') return undefined;
+      return Math.min(100, Math.max(0, Math.round(pct)));
+    } catch (err) {
+      log('engine.getContextPercent.failed', { err: String(err) });
+      return undefined;
+    }
+  }
+
+  // Refresh the phone's context bar. Sources, in preference order:
+  //   1. SDK getContextUsage().percentage — authoritative, knows the real
+  //      per-model context window (even on provider proxies like GLM where
+  //      our name-based heuristic would guess wrong)
+  //   2. compact_boundary's `post_tokens` divided by the name-based limit —
+  //      direct from the SDK after compaction, when getContextUsage isn't
+  //      available (older SDK, control request failed)
+  //   3. Heuristic percentUsed(usage, model) — sums input + cache from the
+  //      result message, divides by name-based limit. Least accurate but
+  //      always available
+  // Logs the source + raw inputs so future "ctx says X% but I don't believe
+  // it" reports come with diagnostic context.
+  private async emitContextStatus(
+    usage: SdkMessageLike['usage'],
+    modelUsage: SdkMessageLike['modelUsage'],
+    directTokens?: number,
+  ): Promise<void> {
+    let pct = await this.getContextPercent();
+    let source: 'sdk' | 'compact_metadata' | 'heuristic' = 'sdk';
+    if (pct === undefined && typeof directTokens === 'number' && directTokens >= 0) {
+      const limit = contextLimitFor(this.currentModel);
+      pct = Math.min(100, Math.max(0, Math.round((directTokens / limit) * 100)));
+      source = 'compact_metadata';
+    }
+    if (pct === undefined) {
+      pct = percentUsed(usage, this.currentModel, modelUsage);
+      source = 'heuristic';
+    }
+    if (pct === undefined) {
+      log('ctx.skip', { reason: 'no_data', model: this.currentModel });
+      return;
+    }
+    log('ctx.emit', {
+      pct,
+      source,
+      model: this.currentModel,
+      in: usage?.input_tokens,
+      cacheRead: usage?.cache_read_input_tokens,
+      cacheCreate: usage?.cache_creation_input_tokens,
+      sdkWindow: modelUsage ? 'present' : 'absent',
+      directTokens,
+    });
+    this.handler({ type: 'context_status', usedPercent: pct });
+  }
+
   stop(): void {
     log('stop', {});
     this.closed = true;
@@ -515,13 +642,9 @@ export class ClaudeEngine implements AgentEngine {
     const requestId = randomUUID();
     log('perm.req', { tool: toolName, requestId });
     this.handler(buildPermissionRequest(requestId, toolName, input));
-    return new Promise<PermissionDecision>((resolve) => {
+    return new Promise<{ decision: PermissionDecision; pattern?: string }>((resolve) => {
       this.permResolvers.set(requestId, resolve);
-    }).then((decision) =>
-      decision === 'deny'
-        ? { behavior: 'deny', message: 'denied by user' }
-        : { behavior: 'allow', updatedInput: input },
-    );
+    }).then(({ decision, pattern }) => buildPermissionResult(toolName, input, decision, pattern));
   };
 
   private async *inputIterable(): AsyncIterable<unknown> {

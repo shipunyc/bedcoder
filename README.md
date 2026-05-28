@@ -1,6 +1,6 @@
 # 🛏️ Bedcoder
 
-> **Drive Claude Code from your phone — in bed.** A mobile-first remote control for AI coding agents.
+> **Drive Claude Code from your phone — in bed.** A mobile-first remote control for AI coding agents — works with Claude, MiniMax, GLM, DeepSeek, or any model on OpenRouter.
 
 Use the official `claude` at your desk. When you want to lie down, start `bedcoder` next to it —
 a tiny headless daemon that **end-to-end encrypts** the Agent SDK message stream and relays it to
@@ -54,18 +54,51 @@ bedcoder --resume
 Then open **[web.bedcoder.org](https://web.bedcoder.org)**, enter the code, confirm the SAS — and code
 from your phone. Back at the desk, `claude --resume` picks the same session right up.
 
+### AI providers
+
+On first launch bedcoder prompts for a backend; the choice is cached so subsequent launches reuse it.
+Skip the menu with a flag:
+
+```bash
+bedcoder --claude       # Anthropic (uses `claude login` or ANTHROPIC_API_KEY)
+bedcoder --minimax      # MiniMax-M2.7
+bedcoder --glm          # GLM (Z.AI)
+bedcoder --deepseek     # DeepSeek
+bedcoder --openrouter   # any model on OpenRouter (Claude / GPT / Llama / …)
+```
+
+Non-Anthropic providers ask for an API key once and cache it in `~/.bedcoder/config.json` (mode 0600).
+For headless / CI use, set the env var instead: `MINIMAX_API_KEY`, `GLM_API_KEY`, `DEEPSEEK_API_KEY`,
+`OPENROUTER_API_KEY`.
+
+| Provider | Where to get a key |
+|----------|--------------------|
+| Claude (Anthropic) | `claude login`, or https://console.anthropic.com/settings/keys |
+| MiniMax | https://platform.minimaxi.com/user-center/basic-information/interface-key |
+| GLM (Z.AI) | https://z.ai/manage-apikey/apikey-list |
+| DeepSeek | https://platform.deepseek.com/api_keys |
+| OpenRouter | https://openrouter.ai/keys |
+
+Pin a specific model with `--model <id>` (use the provider's native model ID — e.g.
+`claude-opus-4-7`, `glm-5.1`, `deepseek-v4-pro`, `openai/gpt-4o`, `meta-llama/llama-3.1-405b-instruct`).
+To route opus / sonnet / haiku tiers to different non-Anthropic models, export
+`ANTHROPIC_DEFAULT_OPUS_MODEL` / `…_SONNET_MODEL` / `…_HAIKU_MODEL` directly.
+
 ### Agent CLI flags
 
 ```
+--claude / --minimax / --glm / --deepseek / --openrouter
+                     skip the provider menu
 --resume [id]        continue an existing ~/.claude session (latest, or a specific id)
 --relay <url>        relay URL (default wss://relay.bedcoder.org)
---model <id>         pin a model (default: latest from the model catalog)
+--model <id>         pin a model (provider's native model ID)
 --models-url <url>   model catalog JSON (or env BEDCODER_MODELS_URL)
 --worktree <name>    run inside .worktrees/<name> — parallel tasks on one repo
 --tunnel [auto|p1,p2] port-discovery hint for the preview tab (preview is always on)
 --rewind-code        enable SDK file checkpointing so /rewind can restore code (opt-in)
 --log [path]         write a diagnostics log (default ~/.bedcoder/agent.log)
---fake               run a fake engine (no Claude auth) — for development
+--skip-version-check skip the startup SDK ↔ claude CLI compatibility check
+--fake               run a fake engine (no provider auth) — for development
 ```
 
 ## Self-hosting the relay

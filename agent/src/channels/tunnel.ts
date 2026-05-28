@@ -19,7 +19,7 @@ export interface TunnelChannelOptions {
   // HTTP request timeout in milliseconds (default: 30000)
   httpTimeoutMs?: number;
   // The session's preview token; if set, the app is told it via preview_info so
-  // it can build https://<relay>/p/<token>/<port>/ links.
+  // it can build https://<port>-<token>.<relayBaseDomain>/ links.
   previewToken?: string;
   // PIDs owned by bedcoder's background tasks; when set, the port list is
   // narrowed to *only* those processes (so Preview shows the hosted ports, not
@@ -87,7 +87,7 @@ export class TunnelChannel {
     // Start port discovery
     this.portService.start(portScanIntervalMs);
 
-    // Tell the app its preview token (for building /p/<token>/<port>/ links).
+    // Tell the app its preview token (for building <port>-<token>.<relay> links).
     if (this.previewToken) this.emit({ type: 'preview_info', token: this.previewToken });
 
     // Send initial port list

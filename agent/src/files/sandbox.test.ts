@@ -186,6 +186,8 @@ describe('Sensitive Path Blocking', () => {
 
 describe('Symlink Escape Prevention', () => {
   it('blocks symlink pointing to /etc', () => {
+    // /etc doesn't exist on Windows; the test is only meaningful on Unix.
+    if (process.platform === 'win32') return;
     const linkPath = join(testRoot, 'etc-link');
     try {
       symlinkSync('/etc', linkPath);
@@ -290,7 +292,7 @@ describe('Sandbox class', () => {
   });
 
   it('relativePath returns path relative to root', () => {
-    expect(sandbox.relativePath(join(testRoot, 'src', 'index.ts'))).toBe('src/index.ts');
+    expect(sandbox.relativePath(join(testRoot, 'src', 'index.ts'))).toBe(join('src', 'index.ts'));
     expect(sandbox.relativePath(testRoot)).toBe('.');
   });
 

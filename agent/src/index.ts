@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { basename } from 'node:path';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, join } from 'node:path';
 import * as readline from 'node:readline';
 import { generateKey } from '@bedcoder/protocol';
 import { parseArgs } from './cli';
@@ -16,8 +18,11 @@ import type { EngineFactory } from './channels/session-controller';
 import { FakeEngine } from './claude/engine';
 import { ClaudeEngine } from './claude/claude-engine';
 import { fetchModelCatalog } from './claude/models';
+import { runVersionCheck } from './version_check';
+import { selectProvider } from './provider_select';
+import { applyProviderEnv } from './providers';
 import { ensureWorktree } from './worktree';
-import { latestSessionId } from './claude/sessions';
+import { latestSessionId, projectDirName } from './claude/sessions';
 import { encodeQrPayload, renderQr } from './auth/qrcode';
 import { log, enableLog, isLogging, logFilePath } from './log';
 import {
@@ -89,6 +94,16 @@ async function main(): Promise<void> {
 
   // Root consent gate: must run before relay/QR so we don't connect-then-abort.
   await confirmRootSandbox();
+
+  // Provider selection: which AI backend drives the Claude CLI subprocess.
+  // `claude` (default) leaves env alone — `claude login`/ANTHROPIC_API_KEY apply.
+  // MiniMax / GLM / DeepSeek inject ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+  // (+ model env, + extras) so the CLI talks to their Anthropic-compatible
+  // endpoint instead. Must run before the SDK spawns its CLI subprocess; same
+  // shape as confirmRootSandbox (TTY prompt that mutates this process's env).
+  const selection = await selectProvider(config.provider);
+  applyProviderEnv(selection.spec, selection.apiKey);
+  log('provider', { id: selection.spec.id });
 
   // SDK file checkpointing (for /rewind code) is OPT-IN via --rewind-code: it
   // uses git "shadow repos" and can stall/kill the CLI subprocess on some setups
@@ -163,6 +178,13 @@ async function main(): Promise<void> {
     },
   });
   await relay.connect();
+
+  // SDK ↔ CLI compatibility check. The SDK declares which CLI version it was
+  // built against; if the user's installed `claude` is out of range, surface it
+  // before we spawn the SDK subprocess (which would otherwise hang silently on
+  // a major-version mismatch — the exact failure mode we shipped this for).
+  // --skip-version-check bypasses entirely.
+  if (!config.skipVersionCheck && !(await runVersionCheck())) process.exit(0);
 
   // Terminal manager for Mirror Tab (tracks hosted bash processes). The tracker
   // observes the SDK message stream (Bash, incl. run_in_background, + BashOutput)
@@ -242,15 +264,27 @@ async function main(): Promise<void> {
   // We kill our whole process subtree (not pidfiles): the SDK runs background
   // Bash itself and ignores our command rewrite, so pidfiles are never written.
   let shuttingDown = false;
-  const shutdown = (signal: NodeJS.Signals): void => {
+  const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     const killed = killDescendants(process.pid);
     log('shutdown', { signal, killed });
+    // Tell the user the exact `claude --resume` command on the way out, since
+    // claude's own /resume picker may not surface SDK-extended sessions (see
+    // claude/sessions.ts). Only print when the jsonl actually exists — a fresh
+    // bedcoder run that never got a turn has no session to resume.
+    const sessionFile = join(homedir(), '.claude', 'projects', projectDirName(cwd), `${sid}.jsonl`);
+    if (existsSync(sessionFile)) {
+      console.log(`\nResume on desk:  claude --resume ${sid}`);
+    }
     process.exit(0);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // On Windows, SIGTERM is unreliable; 'exit' fires for Ctrl+C and process end.
+  if (process.platform === 'win32') {
+    process.on('exit', () => shutdown('exit'));
+  }
 
   const qr = await renderQr(encodeQrPayload({ relayUrl: config.relayUrl, sid, key }));
 
@@ -278,7 +312,7 @@ async function main(): Promise<void> {
     console.log(`Relay:   ${config.relayUrl}`);
     console.log(`Status:  ${status}`);
     console.log(`Log:     ${isLogging() ? logFilePath() : 'off (--log to enable)'}`);
-    console.log('\nCtrl+C to stop. Use `claude --resume` to continue on desktop.');
+    console.log(`\nCtrl+C to stop.  Resume on desk:  claude --resume ${sid}`);
   }
 
   pairing.start();

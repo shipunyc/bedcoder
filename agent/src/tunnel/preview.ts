@@ -1,7 +1,8 @@
 // Preview proxy (DESIGN §5 carve-out, agent side). Claims a per-session token
 // with the relay, then answers the relay's plaintext `preview` control frames by
 // fetching localhost:<port> through the existing HTTP proxy and returning the
-// response. The relay serves these to a browser at https://<relay>/p/<token>/...
+// response. The relay serves these to a browser at
+// https://<port>-<token>.<relayBaseDomain>/...
 
 import { randomBytes } from 'node:crypto';
 import type { PreviewFrame, HttpMethod, HttpHeaders } from '@bedcoder/protocol';

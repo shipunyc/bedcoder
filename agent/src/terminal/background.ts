@@ -13,6 +13,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { TerminalManager } from './manager';
 
+const IS_WIN32 = process.platform === 'win32';
 const POLL_MS = 300; // log tail + exit-check cadence
 
 export interface BgPaths {
@@ -45,6 +46,14 @@ export function shellQuote(s: string): string {
  * Requires bash (process substitution); Claude Code runs Bash via bash.
  */
 export function rewriteBackgroundCommand(original: string, paths: BgPaths): string {
+  if (IS_WIN32) {
+    // Git Bash's $$ is an MSYS PID that Node/taskkill can't use.
+    // /proc/$$/winpid exposes the real Windows PID.
+    return (
+      `cat /proc/$$/winpid > ${shellQuote(paths.pidPath)}; ` +
+      `exec bash -c ${shellQuote(original)} > >(tee ${shellQuote(paths.logPath)}) 2>&1`
+    );
+  }
   return (
     `echo $$ > ${shellQuote(paths.pidPath)}; ` +
     `exec bash -c ${shellQuote(original)} > >(tee ${shellQuote(paths.logPath)}) 2>&1`
@@ -61,8 +70,18 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-// Direct children of a PID (via pgrep -P; empty if pgrep is unavailable).
+// Direct children of a PID. Uses pgrep on Unix, wmic on Windows.
 export function listChildren(pid: number): number[] {
+  if (IS_WIN32) {
+    const res = spawnSync('wmic', ['process', 'where', `ParentProcessId=${pid}`, 'get', 'ProcessId'], {
+      encoding: 'utf-8',
+    });
+    if (res.status !== 0 || !res.stdout) return [];
+    return res.stdout
+      .split('\n')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isFinite(n) && n > 0);
+  }
   const res = spawnSync('pgrep', ['-P', String(pid)], { encoding: 'utf-8' });
   if (res.status !== 0 || !res.stdout) return [];
   return res.stdout
@@ -87,10 +106,26 @@ export function processTree(pid: number, children: (p: number) => number[] = lis
   return out;
 }
 
-// One `ps` snapshot mapping ppid -> child pids. Cheaper than many `pgrep -P`
-// calls when walking the agent's whole tree. Empty if ps is unavailable.
+// One snapshot mapping ppid -> child pids. Uses `ps` on Unix, `wmic` on
+// Windows. Cheaper than many individual queries when walking the agent's tree.
 export function snapshotChildren(
   run: () => string = () => {
+    if (IS_WIN32) {
+      // wmic output: "ParentProcessId  ProcessId\n0  4\n..."
+      // (columns are alphabetical regardless of argument order)
+      const r = spawnSync('wmic', ['process', 'get', 'ProcessId,ParentProcessId'], { encoding: 'utf-8' });
+      if (r.status !== 0 || !r.stdout) return '';
+      // Transform to "pid ppid" per line (matching the ps format the parser expects).
+      return r.stdout
+        .split('\n')
+        .slice(1) // skip header
+        .map((l) => {
+          const m = l.trim().match(/^(\d+)\s+(\d+)/);
+          return m ? `${m[2]} ${m[1]}` : ''; // swap: ParentProcessId,ProcessId → pid ppid
+        })
+        .filter(Boolean)
+        .join('\n');
+    }
     const r = spawnSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf-8' });
     return r.status === 0 && r.stdout ? r.stdout : '';
   },
@@ -135,6 +170,16 @@ export function killDescendants(
   sig: NodeJS.Signals = 'SIGTERM',
   deps: { children?: Map<number, number[]>; signal?: (pid: number, s: NodeJS.Signals) => void } = {},
 ): number {
+  // On Windows, taskkill /T kills an entire tree. We kill each direct child's
+  // tree separately so rootPid itself stays alive. Fall back to manual walk
+  // when test deps are injected.
+  if (IS_WIN32 && !deps.children && !deps.signal) {
+    const directChildren = listChildren(rootPid);
+    for (const child of directChildren) {
+      spawnSync('taskkill', ['/PID', String(child), '/T', '/F']);
+    }
+    return directChildren.length;
+  }
   const set = descendantPids(rootPid, deps.children ?? snapshotChildren());
   const signal =
     deps.signal ??
@@ -174,6 +219,13 @@ export interface KillDeps {
 // Kill a process and its descendants: SIGTERM the leaves-first order. Returns the
 // PIDs it signalled.
 export function killProcessTree(pid: number, sig: NodeJS.Signals = 'SIGTERM', deps: KillDeps = {}): number[] {
+  // On Windows, taskkill /T kills the entire process tree in one atomic call —
+  // simpler and more reliable than walking the tree ourselves. Fall back to the
+  // manual walk when test deps are injected.
+  if (IS_WIN32 && !deps.children && !deps.signal) {
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F']);
+    return [pid];
+  }
   const children = deps.children ?? listChildren;
   const signal =
     deps.signal ??
@@ -263,7 +315,7 @@ export class BackgroundShellManager {
     for (const task of this.tasks.values()) {
       const pid = this.readPid(task);
       if (pid !== undefined) {
-        killProcessTree(pid, 'SIGTERM');
+        killProcessTree(pid);
         killed++;
       }
     }

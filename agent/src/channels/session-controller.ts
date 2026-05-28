@@ -155,8 +155,38 @@ export class SessionController {
     this.engine = this.factory({ sessionId, resume, resumeSessionAt });
     this.bind(this.engine);
     this.deps.emit({ type: 'notice', kind: 'session_reset', text: banner, sessionId });
+    // Refresh the context bar so it doesn't keep showing the previous engine's
+    // value. /clear → fresh session = 0%; /resume → ask the SDK what the
+    // resumed session actually has. Without this, the bar stays stale until
+    // the first new turn fires `result` (which can be a long time on resume).
     if (resume) this.replayTranscript(sessionId, resumeSessionAt);
     this.run(this.engine);
+    if (resume) this.refreshContextAfterResume(this.engine);
+    else this.deps.emit({ type: 'context_status', usedPercent: 0 });
+    this.lastContextPercent = resume ? undefined : 0; // /cost shows the cached value
+  }
+
+  // After /resume the SDK's stream needs a beat to come up (claude-engine.start
+  // does the dynamic import + spawns the CLI). Poll getContextPercent until it
+  // answers, give up after a few seconds. Best-effort — failing silently is fine,
+  // the bar will refresh on the first turn anyway.
+  private refreshContextAfterResume(engine: AgentEngine): void {
+    const get = engine.getContextPercent?.bind(engine);
+    if (!get) return;
+    const start = Date.now();
+    const tick = async (): Promise<void> => {
+      // Skip if a swap has happened since we scheduled this.
+      if (engine !== this.engine) return;
+      const pct = await get();
+      if (pct !== undefined) {
+        this.deps.emit({ type: 'context_status', usedPercent: pct });
+        this.lastContextPercent = pct;
+        return;
+      }
+      if (Date.now() - start > 5_000) return; // give up; first turn will refresh
+      setTimeout(() => void tick(), 250);
+    };
+    setTimeout(() => void tick(), 100);
   }
 
   // Paint the resumed/rewound session's history from its JSONL (the SDK stream is
@@ -281,6 +311,13 @@ export class SessionController {
         this.deps.emit({ type: 'notice', kind: 'dialog', title: 'Context', text: this.contextText() });
         return;
       case 'compact':
+        // SDK 0.3.150 still doesn't expose a manual compact API (no .compact()
+        // method, no SDKControlCompactRequest). Experimentally route the literal
+        // string through user input — the CLI subprocess intercepts `/compact`
+        // exactly like it does in the TUI, runs the compaction, and emits a
+        // SDKCompactBoundaryMessage that flows back through our normal output path.
+        this.engine.sendUserMessage('/compact');
+        return;
       case 'config':
       case 'fast':
         this.deps.emit({ type: 'notice', kind: 'unsupported', text: `/${cmd} is not supported yet.` });

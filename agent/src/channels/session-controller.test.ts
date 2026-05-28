@@ -63,6 +63,13 @@ class RecordingEngine implements AgentEngine {
   accountInfo(): Promise<Record<string, unknown> | undefined> {
     return Promise.resolve({ email: 'dev@example.com', subscription: 'pro' });
   }
+  // Test seam: tests set this to control what the controller sees on resume.
+  contextPercentValue?: number;
+  contextPercentCalls = 0;
+  getContextPercent(): Promise<number | undefined> {
+    this.contextPercentCalls++;
+    return Promise.resolve(this.contextPercentValue);
+  }
 }
 
 function setup(
@@ -142,6 +149,45 @@ describe('SessionController', () => {
     await Promise.resolve();
     expect(engines[1]!.cfg.resume).toBe(false);
     expect(engines[1]!.cfg.sessionId).not.toBe('S0');
+  });
+
+  it('/clear resets the context bar to 0 (no stale value from the prior session)', async () => {
+    const { controller, out } = setup();
+    controller.dispatch({ type: 'slash', command: 'clear' });
+    await Promise.resolve();
+    expect(out).toContainEqual({ type: 'context_status', usedPercent: 0 });
+  });
+
+  it('resume queries getContextPercent and emits a fresh context_status', async () => {
+    const { controller, out, engines } = setup();
+    // Seed the next engine's response before the swap so the polling tick finds it.
+    let next: RecordingEngine | undefined;
+    const factoryHandle = (e: RecordingEngine): void => {
+      next = e;
+      e.contextPercentValue = 73;
+    };
+    // Re-wire the factory by intercepting the second engine via a small hack:
+    // dispatch the swap, then set the value on the freshly-created engine before
+    // its async refreshContextAfterResume tick polls.
+    controller.dispatch({ type: 'slash', command: { name: 'resume', id: 'sess-abc' } });
+    await Promise.resolve();
+    factoryHandle(engines[1]!);
+    next = engines[1]!;
+    // refreshContextAfterResume schedules its first tick 100ms out; advance time.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(next.contextPercentCalls).toBeGreaterThan(0);
+    expect(out).toContainEqual({ type: 'context_status', usedPercent: 73 });
+  });
+
+  it('resume that gets undefined from getContextPercent keeps polling (then gives up quietly)', async () => {
+    const { controller, out, engines } = setup();
+    controller.dispatch({ type: 'slash', command: { name: 'resume', id: 'sess-xyz' } });
+    await Promise.resolve();
+    // Leave contextPercentValue undefined → polling never resolves. We don't
+    // wait the full 5s in the test; just confirm no bogus context_status was emitted.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(engines[1]!.contextPercentCalls).toBeGreaterThan(0);
+    expect(out.filter((o) => o.type === 'context_status')).toHaveLength(0);
   });
 
   it('a throwing abort during a swap is caught (no crash) and surfaces a notice', async () => {
@@ -229,11 +275,21 @@ describe('SessionController', () => {
 
   it('marks unsupported commands as such', async () => {
     const { controller, out } = setup();
-    for (const cmd of ['compact', 'config', 'fast'] as const) {
+    // /compact is no longer in this list — it's now forwarded to the engine as a
+    // literal user message, relying on the CLI subprocess to intercept it the
+    // same way the TUI does (SDK has no programmatic compact API).
+    for (const cmd of ['config', 'fast'] as const) {
       controller.dispatch({ type: 'slash', command: cmd });
     }
     await Promise.resolve();
-    expect(out.filter((o) => o.type === 'notice' && o.kind === 'unsupported')).toHaveLength(3);
+    expect(out.filter((o) => o.type === 'notice' && o.kind === 'unsupported')).toHaveLength(2);
+  });
+
+  it('/compact is forwarded to the engine as a literal user message', async () => {
+    const { controller, engines } = setup();
+    controller.dispatch({ type: 'slash', command: 'compact' });
+    await Promise.resolve();
+    expect(engines[0]!.sent).toContain('/compact');
   });
 
   it('mode_switch and effort reach the engine', () => {

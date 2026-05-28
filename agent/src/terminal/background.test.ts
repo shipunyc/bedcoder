@@ -34,13 +34,18 @@ describe('pure helpers', () => {
 
   it('bgPaths builds log + pid paths under the runs dir', () => {
     const p = bgPaths('/runs', 'term-1');
-    expect(p.logPath).toBe('/runs/term-1.log');
-    expect(p.pidPath).toBe('/runs/term-1.pid');
+    expect(p.logPath).toBe(join('/runs', 'term-1.log'));
+    expect(p.pidPath).toBe(join('/runs', 'term-1.pid'));
   });
 
   it('rewriteBackgroundCommand records the pid, execs, and tees to the log', () => {
     const cmd = rewriteBackgroundCommand('npm run dev', { logPath: '/r/x.log', pidPath: '/r/x.pid' });
-    expect(cmd).toContain('echo $$ > ');
+    if (process.platform === 'win32') {
+      // Windows variant uses /proc/$$/winpid to get the real Windows PID
+      expect(cmd).toContain('cat /proc/$$/winpid > ');
+    } else {
+      expect(cmd).toContain('echo $$ > ');
+    }
     expect(cmd).toContain("'/r/x.pid'");
     expect(cmd).toContain('exec bash -c');
     expect(cmd).toContain("'npm run dev'");

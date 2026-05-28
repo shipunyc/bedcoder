@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,13 +23,19 @@ import (
 	"github.com/bedcoder/relay/internal/store"
 )
 
-type Server struct {
-	hub     *hub.Hub
-	rv      *pairing.Rendezvous
-	store   *store.Store
-	pusher  push.Pusher
-	preview *previewState
+// maxStatusIDs caps the number of session ids /sessions/status accepts in one
+// request, to keep the in-memory scan bounded.
+const maxStatusIDs = 200
 
+type Server struct {
+	hub             *hub.Hub
+	rv              *pairing.Rendezvous
+	store           *store.Store
+	pusher          push.Pusher
+	preview         *previewState
+	previewLimiters *previewLimiterRegistry
+
+	previewBaseDomain  string
 	originPatterns     []string
 	insecureSkipOrigin bool
 	connSeq            atomic.Uint64
@@ -38,10 +45,23 @@ type Options struct {
 	// AllowedOrigins are exact Origin patterns for browser clients; "*" allows
 	// any origin (dev only). Native apps send no Origin and are unaffected.
 	AllowedOrigins []string
+	// PreviewBaseDomain is the parent domain whose subdomains carry preview
+	// traffic: a request to "<port>-<token>.<PreviewBaseDomain>" is routed to
+	// the matching session's agent. Empty disables host-based preview (used by
+	// tests that don't exercise the HTTP layer through Handler()).
+	PreviewBaseDomain string
 }
 
 func New(h *hub.Hub, rv *pairing.Rendezvous, st *store.Store, p push.Pusher, opts Options) *Server {
-	s := &Server{hub: h, rv: rv, store: st, pusher: p, preview: newPreviewState()}
+	s := &Server{
+		hub:               h,
+		rv:                rv,
+		store:             st,
+		pusher:            p,
+		preview:           newPreviewState(),
+		previewLimiters:   newPreviewLimiterRegistry(loadPreviewLimits()),
+		previewBaseDomain: strings.ToLower(strings.TrimSpace(opts.PreviewBaseDomain)),
+	}
 	for _, o := range opts.AllowedOrigins {
 		if o == "*" {
 			s.insecureSkipOrigin = true
@@ -73,8 +93,77 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/p/", s.handlePreviewHTTP) // preview reverse-proxy (see preview.go)
-	return mux
+	mux.HandleFunc("/sessions/status", s.handleSessionStatus)
+
+	// Preview reverse-proxy: requests whose Host is "<port>-<token>.<base>" are
+	// routed to the matching session's agent (see preview.go). The base domain
+	// itself (relay.bedcoder.org) keeps serving /ws + /health + /sessions/status.
+	if s.previewBaseDomain == "" {
+		return mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if port, token, ok := parsePreviewHost(r.Host, s.previewBaseDomain); ok {
+			s.handlePreviewHostHTTP(w, r, port, token)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// handleSessionStatus reports whether each requested session currently has at
+// least one live agent WebSocket connection. The relay never persists this; it
+// is derived in-memory from the hub. Used by the app's session list to show
+// online/offline indicators (no secrets are exposed — session ids are not
+// secret in the zero-knowledge model).
+//
+// Request:  GET /sessions/status?ids=sid1,sid2,...
+// Response: {"sessions":[{"id":"sid1","agentOnline":true}, ...]}
+func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	type entry struct {
+		ID          string `json:"id"`
+		AgentOnline bool   `json:"agentOnline"`
+	}
+	type response struct {
+		Sessions []entry `json:"sessions"`
+	}
+
+	out := response{Sessions: []entry{}}
+	raw := strings.TrimSpace(r.URL.Query().Get("ids"))
+	if raw != "" {
+		seen := make(map[string]struct{})
+		for _, id := range strings.Split(raw, ",") {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out.Sessions = append(out.Sessions, entry{
+				ID:          id,
+				AgentOnline: len(s.hub.Peers(id, "agent")) > 0,
+			})
+			if len(out.Sessions) >= maxStatusIDs {
+				break
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // pairMsg is the relay's view of a pairing-plane message. Binary fields are
@@ -136,7 +225,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			s.hub.Unregister(conn)
 		}
 		if conn.Role == "agent" && conn.SID != "" {
-			s.preview.removeSID(conn.SID) // drop this session's preview tokens
+			s.preview.removeSID(conn.SID)         // drop this session's preview tokens
+			s.previewLimiters.drop(conn.SID)      // and its rate-limit buckets
 		}
 		if conn.Code != "" {
 			s.rv.Remove(conn.Code)

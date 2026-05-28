@@ -124,6 +124,11 @@ export interface SdkMessageLike {
   // Partial-assistant streaming (type:'stream_event'); event is a raw Anthropic
   // streaming event. delta.type distinguishes text_delta from thinking_delta.
   event?: { type?: string; delta?: { type?: string; text?: string } };
+  // SDKCompactBoundaryMessage (subtype='compact_boundary'). pre_tokens /
+  // post_tokens let us refresh the context bar the moment compaction finishes,
+  // instead of waiting for the next turn's `result` (which often has zero usage
+  // and doesn't refresh the bar — leaving stale pre-compact data on screen).
+  compact_metadata?: { pre_tokens?: number; post_tokens?: number };
 }
 
 function asRecord(v: unknown): Record<string, unknown> | undefined {

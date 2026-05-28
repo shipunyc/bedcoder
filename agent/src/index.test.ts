@@ -10,7 +10,13 @@ describe('parseArgs', () => {
       log: false,
       modelsUrl: DEFAULT_MODELS_URL,
       rewindCode: false,
+      skipVersionCheck: false,
     });
+  });
+
+  it('--skip-version-check opts out of the startup compatibility check', () => {
+    expect(parseArgs([]).skipVersionCheck).toBe(false);
+    expect(parseArgs(['--skip-version-check']).skipVersionCheck).toBe(true);
   });
 
   it('--rewind-code opts into file checkpointing (off by default)', () => {

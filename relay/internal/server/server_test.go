@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -213,6 +215,99 @@ func TestOriginAllowlist(t *testing.T) {
 	}); err == nil {
 		_ = c.CloseNow()
 		t.Fatal("disallowed origin was accepted")
+	}
+}
+
+type statusResp struct {
+	Sessions []struct {
+		ID          string `json:"id"`
+		AgentOnline bool   `json:"agentOnline"`
+	} `json:"sessions"`
+}
+
+func getStatus(t *testing.T, ts *httptest.Server, ids string) statusResp {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/sessions/status?ids=" + ids)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var out statusResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return out
+}
+
+func TestSessionsStatusReflectsLiveAgents(t *testing.T) {
+	ts, _, _ := newTestServer(t)
+
+	// No agents anywhere -> both offline.
+	r := getStatus(t, ts, "S1,S2")
+	if len(r.Sessions) != 2 {
+		t.Fatalf("expected 2 entries, got %+v", r.Sessions)
+	}
+	for _, s := range r.Sessions {
+		if s.AgentOnline {
+			t.Fatalf("expected %s offline, got online", s.ID)
+		}
+	}
+
+	// Bring an agent online for S1.
+	agent := dial(t, ts, "?role=agent&sid=S1")
+	defer agent.CloseNow()
+
+	// Poll until the handler observes the registration (Register happens
+	// after Accept on the server goroutine).
+	waitFor(t, func() bool {
+		r := getStatus(t, ts, "S1,S2")
+		var s1, s2 bool
+		for _, s := range r.Sessions {
+			if s.ID == "S1" {
+				s1 = s.AgentOnline
+			}
+			if s.ID == "S2" {
+				s2 = s.AgentOnline
+			}
+		}
+		return s1 && !s2
+	})
+
+	// Close the agent; status returns to offline.
+	_ = agent.Close(websocket.StatusNormalClosure, "bye")
+	waitFor(t, func() bool {
+		r := getStatus(t, ts, "S1")
+		return len(r.Sessions) == 1 && !r.Sessions[0].AgentOnline
+	})
+}
+
+func TestSessionsStatusEdgeCases(t *testing.T) {
+	ts, _, _ := newTestServer(t)
+
+	// Empty ids -> empty list, 200 OK.
+	r := getStatus(t, ts, "")
+	if len(r.Sessions) != 0 {
+		t.Fatalf("expected empty, got %+v", r.Sessions)
+	}
+
+	// Duplicate ids deduped; whitespace trimmed.
+	r = getStatus(t, ts, "S1,%20S1%20,,S2")
+	if len(r.Sessions) != 2 {
+		t.Fatalf("expected dedup to 2 entries, got %+v", r.Sessions)
+	}
+
+	// Non-GET rejected with 405.
+	resp, err := http.Post(ts.URL+"/sessions/status", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", resp.StatusCode)
 	}
 }
 

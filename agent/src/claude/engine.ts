@@ -50,6 +50,10 @@ export interface AgentEngine {
   rewindFiles(id: string): Promise<RewindResult>;
   // Account/subscription info for /status (raw fields; undefined if unavailable).
   accountInfo(): Promise<Record<string, unknown> | undefined>;
+  // Real context usage from the SDK, in percent (0-100). Undefined when the
+  // SDK can't tell us (no stream yet, control request failed, fake engine).
+  // Used after /resume to refresh the bar without waiting for a first turn.
+  getContextPercent?(): Promise<number | undefined>;
 }
 
 // FakeEngine is a deterministic engine for tests and `bedcoder --fake`: it echoes

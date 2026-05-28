@@ -151,8 +151,10 @@ async function executeRequest(
       const message = err.message;
 
       // Determine error type
-      // Check both message and error code for ECONNREFUSED
-      if (message.includes('ECONNREFUSED') || err.code === 'ECONNREFUSED') {
+      // Check both message and error code for ECONNREFUSED.
+      // On Windows, connecting to a non-listening port via 'localhost' (IPv6) may
+      // yield EACCES instead of ECONNREFUSED — treat it the same way.
+      if (message.includes('ECONNREFUSED') || err.code === 'ECONNREFUSED' || err.code === 'EACCES') {
         resolve({
           type: 'http_error',
           id: requestId,

@@ -89,23 +89,26 @@ export class TerminalTracker {
     for (const block of content) {
       if (!isToolUseBlock(block)) continue;
 
-      if (block.name === 'Bash') {
+      // Windows uses PowerShell/Cmd in place of Bash, and the polling/kill tool
+      // names are now shell-agnostic (ShellOutput/KillShell). Old names kept for
+      // back-compat with older CLIs.
+      if (isShellCommandTool(block.name)) {
         const command = extractCommand(block.input);
         if (!command) continue;
         const bg = block.input?.run_in_background === true;
         const terminal = this.manager.register(command);
         this.toolUse.set(block.id, { terminal, kind: bg ? 'bg' : 'fg' });
         if (bg) this.lastBackground = terminal;
-        log('term.bash', { bg, terminal });
-      } else if (block.name === 'BashOutput') {
+        log('term.shell', { tool: block.name, bg, terminal });
+      } else if (block.name === 'ShellOutput' || block.name === 'BashOutput') {
         // A poll of a background shell — route its result to that terminal.
         const terminal = this.terminalForShell(block.input);
         if (terminal) this.toolUse.set(block.id, { terminal, kind: 'output' });
-        log('term.bashoutput', { routed: !!terminal });
-      } else if (block.name === 'KillBash') {
+        log('term.shelloutput', { tool: block.name, routed: !!terminal });
+      } else if (block.name === 'KillShell' || block.name === 'KillBash') {
         const terminal = this.terminalForShell(block.input);
         if (terminal) this.exit(terminal, -1);
-        log('term.killbash', { matched: !!terminal });
+        log('term.killshell', { tool: block.name, matched: !!terminal });
       }
     }
   }
@@ -193,6 +196,14 @@ export class TerminalTracker {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+// Tool names that take a `command` input and run a shell command. Claude uses
+// different names per platform: Bash (Unix or Windows w/ Git Bash) — relabelled
+// SandboxedBash when the CLI's sandbox is active; PowerShell and Cmd (Windows).
+// Zsh/fish/sh aren't separate tools — Bash runs under whatever $SHELL is.
+function isShellCommandTool(name: string): boolean {
+  return name === 'Bash' || name === 'SandboxedBash' || name === 'PowerShell' || name === 'Cmd';
+}
 
 function isToolUseBlock(block: unknown): block is ToolUseBlock {
   const b = block as Record<string, unknown>;

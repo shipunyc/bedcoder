@@ -20,6 +20,9 @@ func main() {
 	addr := env("BEDCODER_ADDR", ":8787")
 	dbPath := env("BEDCODER_DB", "bedcoder.db")
 	origins := splitNonEmpty(os.Getenv("BEDCODER_ALLOWED_ORIGINS"))
+	// Parent of preview subdomains: requests to "<port>-<token>.<this>" hit the
+	// preview reverse-proxy. Empty disables host-based preview routing.
+	previewBase := env("BEDCODER_PREVIEW_BASE_DOMAIN", "relay.bedcoder.org")
 
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -45,7 +48,10 @@ func main() {
 		log.Printf("Web Push (VAPID) enabled")
 	}
 
-	srv := server.New(hub.New(), rv, st, pusher, server.Options{AllowedOrigins: origins})
+	srv := server.New(hub.New(), rv, st, pusher, server.Options{
+		AllowedOrigins:    origins,
+		PreviewBaseDomain: previewBase,
+	})
 
 	// Periodically drop expired, never-claimed pairing slots.
 	go func() {
@@ -56,7 +62,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("bedcoder-relay %s listening on %s (origins=%v)", version.Version, addr, origins)
+	log.Printf("bedcoder-relay %s listening on %s (origins=%v previewBase=%q)", version.Version, addr, origins, previewBase)
 	hs := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
