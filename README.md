@@ -19,7 +19,7 @@ shared **protocol**, and **e2e** tests. The mobile/web client (Flutter) is maint
 |----------|------|
 | 🌐 Web | **[web.bedcoder.org](https://web.bedcoder.org)** |
 | 🍎 iOS | **[App Store](https://apps.apple.com/us/app/bedcoder/id6773443099)** |
-| 🤖 Android | **[Download APK](https://bedcoder-1258375119.cos.ap-shanghai.myqcloud.com/app-release.apk)** |
+| 🤖 Android | **[Download APK](https://github.com/shipunyc/bedcoder/releases/download/Android-v1.0.1/bedcoder-1-0-1.apk)** |
 
 ---
 
@@ -59,7 +59,7 @@ bedcoder --resume
 ```
 
 Then open the **[web client](https://web.bedcoder.org)** (or the [iOS](https://apps.apple.com/us/app/bedcoder/id6773443099)
-/ [Android](https://bedcoder-1258375119.cos.ap-shanghai.myqcloud.com/app-release.apk) app), enter the
+/ [Android](https://github.com/shipunyc/bedcoder/releases/download/Android-v1.0.1/bedcoder-1-0-1.apk) app), enter the
 code, confirm the SAS — and code from your phone. Back at the desk, `claude --resume` picks the same
 session right up.
 
@@ -164,7 +164,7 @@ vice versa — no parallel session store.
 The Flutter mobile/web client is not open-source yet, and we will make them public after the product
 receives enough downloads. In the meantime, use the hosted clients: the
 [web client](https://web.bedcoder.org), the [iOS app](https://apps.apple.com/us/app/bedcoder/id6773443099),
-or the [Android APK](https://bedcoder-1258375119.cos.ap-shanghai.myqcloud.com/app-release.apk).
+or the [Android APK](https://github.com/shipunyc/bedcoder/releases/download/Android-v1.0.1/bedcoder-1-0-1.apk).
 
 ## License
 
