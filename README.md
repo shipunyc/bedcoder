@@ -11,8 +11,15 @@ hand off with context intact.
 > pairing code + QR; all interaction happens on the phone.
 
 This repository is the **open-source core**: the **agent** (the `bedcoder` CLI), the **relay**, the
-shared **protocol**, and **e2e** tests. The mobile/web client (Flutter) is maintained separately; a
-hosted web client is available at **[web.bedcoder.org](https://web.bedcoder.org)**.
+shared **protocol**, and **e2e** tests. The mobile/web client (Flutter) is maintained separately.
+
+## Clients
+
+| Platform | Link |
+|----------|------|
+| 🌐 Web | **[web.bedcoder.org](https://web.bedcoder.org)** |
+| 🍎 iOS | **[App Store](https://apps.apple.com/us/app/bedcoder/id6773443099)** |
+| 🤖 Android | **[Download APK](https://bedcoder-1258375119.cos.ap-shanghai.myqcloud.com/app-release.apk)** |
 
 ---
 
@@ -51,8 +58,10 @@ bedcoder                 # new session — prints a pairing code + QR
 bedcoder --resume
 ```
 
-Then open **[web.bedcoder.org](https://web.bedcoder.org)**, enter the code, confirm the SAS — and code
-from your phone. Back at the desk, `claude --resume` picks the same session right up.
+Then open the **[web client](https://web.bedcoder.org)** (or the [iOS](https://apps.apple.com/us/app/bedcoder/id6773443099)
+/ [Android](https://bedcoder-1258375119.cos.ap-shanghai.myqcloud.com/app-release.apk) app), enter the
+code, confirm the SAS — and code from your phone. Back at the desk, `claude --resume` picks the same
+session right up.
 
 ### AI providers
 
@@ -153,7 +162,9 @@ vice versa — no parallel session store.
 ## What's not here
 
 The Flutter mobile/web client is not open-source yet, and we will make them public after the product
-receives enough downloads. The hosted web client is at [web.bedcoder.org](https://web.bedcoder.org).
+receives enough downloads. In the meantime, use the hosted clients: the
+[web client](https://web.bedcoder.org), the [iOS app](https://apps.apple.com/us/app/bedcoder/id6773443099),
+or the [Android APK](https://bedcoder-1258375119.cos.ap-shanghai.myqcloud.com/app-release.apk).
 
 ## License
 
