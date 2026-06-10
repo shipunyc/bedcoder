@@ -36,6 +36,23 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--worktree', '--fake'])).toThrow();
   });
 
+  it('parses --mcp-timeout <seconds> → ms (rejects missing/zero/negative)', () => {
+    expect(parseArgs(['--mcp-timeout', '300']).mcpTimeoutMs).toBe(300_000);
+    expect(parseArgs([]).mcpTimeoutMs).toBeUndefined();
+    expect(() => parseArgs(['--mcp-timeout'])).toThrow();
+    expect(() => parseArgs(['--mcp-timeout', '0'])).toThrow(); // must be positive
+    expect(() => parseArgs(['--mcp-timeout', '-5'])).toThrow();
+    expect(() => parseArgs(['--mcp-timeout', '--fake'])).toThrow();
+  });
+
+  it('parses --stall-warn <seconds> → ms (0 allowed = disabled)', () => {
+    expect(parseArgs(['--stall-warn', '45']).stallWarnMs).toBe(45_000);
+    expect(parseArgs(['--stall-warn', '0']).stallWarnMs).toBe(0); // disables the watchdog
+    expect(parseArgs([]).stallWarnMs).toBeUndefined();
+    expect(() => parseArgs(['--stall-warn'])).toThrow();
+    expect(() => parseArgs(['--stall-warn', '-1'])).toThrow();
+  });
+
   it('parses --log (default path) and --log <path>', () => {
     const bare = parseArgs(['--log']);
     expect(bare.log).toBe(true);

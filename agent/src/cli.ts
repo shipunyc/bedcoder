@@ -26,6 +26,27 @@ export interface CliConfig {
   // Force a specific AI provider backend (skip the interactive menu).
   // --claude / --minimax / --glm / --deepseek are mutually exclusive.
   provider?: ProviderId;
+  // Hard per-call MCP tool timeout, in milliseconds (--mcp-timeout takes seconds
+  // and is converted here). Sets MCP_TOOL_TIMEOUT for the CLI subprocess so a
+  // hung MCP server can't freeze a turn forever. Undefined = env var or the
+  // built-in default (10 min).
+  mcpTimeoutMs?: number;
+  // Stall-watchdog threshold, in milliseconds (--stall-warn takes seconds). After
+  // this long with no SDK message while a tool is in flight, the agent warns the
+  // phone so the user can Abort a stuck call by hand. Undefined = default (60s);
+  // 0 disables the watchdog.
+  stallWarnMs?: number;
+}
+
+// Parse a non-negative duration in seconds from a CLI value → milliseconds.
+// `allowZero` permits 0 (used by --stall-warn to disable the watchdog).
+function parseSeconds(flag: string, value: string | undefined, allowZero: boolean): number {
+  if (value === undefined || value.startsWith('--')) throw new Error(`${flag} requires a value in seconds`);
+  const secs = Number(value);
+  if (!Number.isFinite(secs) || secs < 0 || (!allowZero && secs === 0)) {
+    throw new Error(`${flag} must be a ${allowZero ? 'non-negative' : 'positive'} number of seconds`);
+  }
+  return Math.round(secs * 1000);
 }
 
 export const DEFAULT_RELAY_URL = 'wss://relay.bedcoder.org';
@@ -132,6 +153,16 @@ export function parseArgs(argv: string[]): CliConfig {
         const next = argv[i + 1];
         if (!next || next.startsWith('--')) throw new Error('--worktree requires a name');
         config.worktree = next;
+        i++;
+        break;
+      }
+      case '--mcp-timeout': {
+        config.mcpTimeoutMs = parseSeconds('--mcp-timeout', argv[i + 1], false);
+        i++;
+        break;
+      }
+      case '--stall-warn': {
+        config.stallWarnMs = parseSeconds('--stall-warn', argv[i + 1], true);
         i++;
         break;
       }

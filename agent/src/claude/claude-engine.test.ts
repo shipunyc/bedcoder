@@ -15,6 +15,9 @@ import {
   tokensForEffort,
   derivePattern,
   buildPermissionResult,
+  shouldWarnStall,
+  stallNoticeText,
+  STALL_WARN_MS,
 } from './claude-engine';
 
 describe('mapSessionModeToPermissionMode', () => {
@@ -355,5 +358,156 @@ describe('ClaudeEngine stream-end handling', () => {
     const models = await engine.listModels();
     expect(models.map((m) => m.id)).toEqual(['claude-opus-4-7', 'claude-sonnet-4-6']);
     expect(models.find((m) => m.id === 'claude-opus-4-7')?.current).toBe(true);
+  });
+});
+
+describe('shouldWarnStall (watchdog gating)', () => {
+  const base = {
+    busy: true,
+    pendingPermissions: 0,
+    pendingTools: 1,
+    idleMs: STALL_WARN_MS,
+    sinceLastNoticeMs: STALL_WARN_MS,
+    warnMs: STALL_WARN_MS,
+  };
+
+  it('warns when busy, a tool is in flight, and it has been silent past the threshold', () => {
+    expect(shouldWarnStall(base)).toBe(true);
+  });
+
+  it('is disabled when warnMs <= 0', () => {
+    expect(shouldWarnStall({ ...base, warnMs: 0 })).toBe(false);
+  });
+
+  it('honors a custom threshold (warns at/after warnMs, not before)', () => {
+    expect(shouldWarnStall({ ...base, warnMs: 5_000, idleMs: 4_999, sinceLastNoticeMs: 5_000 })).toBe(false);
+    expect(shouldWarnStall({ ...base, warnMs: 5_000, idleMs: 5_000, sinceLastNoticeMs: 5_000 })).toBe(true);
+  });
+
+  it('does not warn when the turn is idle (not busy)', () => {
+    expect(shouldWarnStall({ ...base, busy: false })).toBe(false);
+  });
+
+  it('does not warn while waiting on the user to answer a permission', () => {
+    expect(shouldWarnStall({ ...base, pendingPermissions: 1 })).toBe(false);
+  });
+
+  it('does not warn when no tool is in flight (model is just thinking)', () => {
+    expect(shouldWarnStall({ ...base, pendingTools: 0 })).toBe(false);
+  });
+
+  it('does not warn before the silence threshold', () => {
+    expect(shouldWarnStall({ ...base, idleMs: STALL_WARN_MS - 1 })).toBe(false);
+  });
+
+  it('rate-limits re-warns to one per threshold window', () => {
+    expect(shouldWarnStall({ ...base, sinceLastNoticeMs: STALL_WARN_MS - 1 })).toBe(false);
+  });
+});
+
+describe('stallNoticeText', () => {
+  it('names the tool and elapsed seconds', () => {
+    expect(stallNoticeText(60_000, 'mcp__x__y')).toContain('mcp__x__y');
+    expect(stallNoticeText(60_000, 'mcp__x__y')).toContain('60s');
+  });
+  it('falls back to a generic phrase without a tool name', () => {
+    expect(stallNoticeText(90_000)).toContain('A tool');
+  });
+});
+
+describe('ClaudeEngine stall watchdog (wiring)', () => {
+  beforeEach(() => queryMock.mockReset());
+
+  it('emits a stall notice when a tool call hangs with no further SDK messages', async () => {
+    vi.useFakeTimers();
+    try {
+      // A stream that yields one tool_use, then blocks forever — models a hung
+      // MCP tool whose result never arrives. `consumed` resolves the moment the
+      // loop asks for the *next* message, i.e. once the tool_use has been
+      // processed (pendingTools populated) — deterministic, no timer guessing.
+      let markConsumed!: () => void;
+      const consumed = new Promise<void>((r) => (markConsumed = r));
+      const toolGate = new Promise<void>(() => {});
+      queryMock.mockReturnValue({
+        [Symbol.asyncIterator]: () => {
+          let sent = false;
+          return {
+            next: async () => {
+              if (!sent) {
+                sent = true;
+                return {
+                  value: { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'mcp__boom__hang', input: {} }] } },
+                  done: false,
+                };
+              }
+              markConsumed();
+              await toolGate;
+              return { value: undefined, done: true };
+            },
+          };
+        },
+      });
+
+      const engine = new ClaudeEngine({ sessionId: 's1', resume: false });
+      const outs: TerminalOutput[] = [];
+      engine.onOutput((o) => outs.push(o));
+      engine.sendUserMessage('call the hang tool'); // state = thinking
+      void engine.start();
+
+      // Microtask-driven: wait until the tool_use is actually consumed (import +
+      // first loop iteration), independent of any timer.
+      await consumed;
+      // Advance past the warn threshold so the interval fires checkStall.
+      await vi.advanceTimersByTimeAsync(STALL_WARN_MS + 20_000);
+
+      const notices = outs.filter((o): o is Extract<TerminalOutput, { type: 'notice' }> => o.type === 'notice');
+      expect(notices.some((n) => n.kind === 'info' && /may be stuck/.test(n.text))).toBe(true);
+      expect(notices.some((n) => n.text.includes('mcp__boom__hang'))).toBe(true);
+
+      // After abort the in-flight tool is cleared, so no further warns fire.
+      engine.abort();
+      const afterAbort = outs.length;
+      await vi.advanceTimersByTimeAsync(STALL_WARN_MS * 2);
+      expect(outs.slice(afterAbort).some((o) => o.type === 'notice')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not warn when the watchdog is disabled (stallWarnMs = 0)', async () => {
+    vi.useFakeTimers();
+    try {
+      let markConsumed!: () => void;
+      const consumed = new Promise<void>((r) => (markConsumed = r));
+      const toolGate = new Promise<void>(() => {});
+      queryMock.mockReturnValue({
+        [Symbol.asyncIterator]: () => {
+          let sent = false;
+          return {
+            next: async () => {
+              if (!sent) {
+                sent = true;
+                return { value: { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'mcp__boom__hang', input: {} }] } }, done: false };
+              }
+              markConsumed();
+              await toolGate;
+              return { value: undefined, done: true };
+            },
+          };
+        },
+      });
+
+      const engine = new ClaudeEngine({ sessionId: 's1', resume: false, stallWarnMs: 0 });
+      const outs: TerminalOutput[] = [];
+      engine.onOutput((o) => outs.push(o));
+      engine.sendUserMessage('call the hang tool');
+      void engine.start();
+
+      await consumed;
+      await vi.advanceTimersByTimeAsync(STALL_WARN_MS * 3);
+      expect(outs.some((o) => o.type === 'notice')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

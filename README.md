@@ -105,6 +105,8 @@ To route opus / sonnet / haiku tiers to different non-Anthropic models, export
 --worktree <name>    run inside .worktrees/<name> — parallel tasks on one repo
 --tunnel [auto|p1,p2] port-discovery hint for the preview tab (preview is always on)
 --rewind-code        enable SDK file checkpointing so /rewind can restore code (opt-in)
+--mcp-timeout <secs> hard cap per MCP tool call (default 600); a hung MCP server can't freeze a turn
+--stall-warn <secs>  warn the phone if a tool call goes silent this long (default 60; 0 disables it)
 --log [path]         write a diagnostics log (default ~/.bedcoder/agent.log)
 --skip-version-check skip the startup SDK ↔ claude CLI compatibility check
 --fake               run a fake engine (no provider auth) — for development

@@ -112,6 +112,21 @@ async function main(): Promise<void> {
   // Must be set before the SDK spawns its CLI subprocess.
   if (config.rewindCode) process.env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING ??= '1';
 
+  // Backstop so a hung/slow MCP server can't freeze the phone forever. The CLI's
+  // default MCP_TOOL_TIMEOUT is ~1e8 ms (≈27h) — effectively infinite: a tool
+  // that never returns leaves the SDK awaiting its result, so no `result` message
+  // is emitted, the engine stays in "thinking", and the app spins until the user
+  // hits Abort (interrupt). With a real ceiling the call fails with an error
+  // tool_result instead, the model recovers, and the turn finalizes on its own.
+  // It is a HARD wall-clock cap (progress notifications don't extend it), so we
+  // keep it high — 10 min — to avoid false-killing legit slow tools; the engine's
+  // stall watchdog (claude-engine.ts) surfaces a notice far earlier (~60s) so the
+  // user can tell "stuck" from "slow" and Abort by hand.
+  // Precedence: --mcp-timeout > MCP_TOOL_TIMEOUT env > the 10-min default.
+  // Must be set before the SDK spawns its CLI subprocess.
+  if (config.mcpTimeoutMs !== undefined) process.env.MCP_TOOL_TIMEOUT = String(config.mcpTimeoutMs);
+  else process.env.MCP_TOOL_TIMEOUT ??= '600000';
+
   // Last-resort safety net: the SDK's internal machinery (e.g. ProcessTransport
   // .write from streamInput/interrupt) can reject or throw when its CLI
   // subprocess dies — common on a remote box where `claude` isn't authed. Those
@@ -204,7 +219,7 @@ async function main(): Promise<void> {
   const factory: EngineFactory = config.fake
     ? (cfg) => new FakeEngine(cfg)
     : (cfg) => {
-        const engine = new ClaudeEngine({ ...cfg, model, models: catalog.models });
+        const engine = new ClaudeEngine({ ...cfg, model, models: catalog.models, stallWarnMs: config.stallWarnMs });
         engine.onRawMessage((msg) => {
           terminalTracker.track(msg as TrackableMessage);
         });

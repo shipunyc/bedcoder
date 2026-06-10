@@ -26,6 +26,8 @@ right back up.
 | `--relay <wss://…>` | Use a different relay (e.g. your self-hosted one). |
 | `--resume [id]` | Continue this project's latest `~/.claude` session (or a specific id). |
 | `--rewind-code` | Enable file checkpointing so `/rewind` can restore code. Off by default — it uses git "shadow repos" and needs git + a normal, writable repo; on setups without that it can stall the agent. Conversation rewind works regardless. |
+| `--mcp-timeout <seconds>` | Hard wall-clock cap on each MCP tool call (default 600 = 10 min). A hung MCP server would otherwise wait ~27 h, freezing the turn; with a cap it fails with an error and the turn recovers. Overrides the `MCP_TOOL_TIMEOUT` env var. |
+| `--stall-warn <seconds>` | How long a turn may go silent (tool in flight, no permission pending) before the phone gets a "may be stuck — tap Abort" notice (default 60). `0` disables the warning. |
 | `--fake` | Echo engine — pair & test the channel without Claude auth. |
 | `--log [path]` | Write a diagnostics log (off by default). Defaults to `~/.bedcoder/agent.log`; pass a path to override. |
 
@@ -39,6 +41,26 @@ macOS and Linux are first-class. On **Windows, run the agent inside WSL2** — i
 the supported path today (zero changes; `claude` + `bedcoder` share WSL's
 `~/.claude`). Native Windows is partially supported. See
 [`docs/WINDOWS.md`](../docs/WINDOWS.md).
+
+### MCP tools
+
+MCP tools run inside the official `claude` CLI (configure them in `~/.claude.json`
+or a project `.mcp.json` as usual). Because they call out to external processes,
+they can hang — and the CLI's default per-call timeout is effectively infinite,
+which would freeze the turn forever (the phone just keeps showing the timer). Two
+layers guard against that:
+
+- **Hard timeout** — each MCP tool call is capped at `--mcp-timeout` (default 10
+  min). A stuck call fails with an error and the turn recovers on its own. It's a
+  blunt wall-clock cap, so the default is high to avoid cutting off a legit slow
+  tool; lower it if your tools are quick.
+- **Stall watchdog** — if a turn goes `--stall-warn` seconds (default 60) with no
+  activity while a tool is in flight, the phone gets a "may be stuck — tap Abort"
+  notice naming the tool, so you can cancel by hand long before the hard cap. Set
+  `--stall-warn 0` to turn it off.
+
+There are testing fixtures (a tiny stdio MCP server with a `hang_forever` tool)
+under [`test-fixtures/`](./test-fixtures/).
 
 ### Diagnostics log
 

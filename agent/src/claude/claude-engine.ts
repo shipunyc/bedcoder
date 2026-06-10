@@ -20,6 +20,41 @@ import type {
   RewindResult,
 } from './engine';
 
+// Stall watchdog tuning. Warn once a running turn has gone this long with no SDK
+// message (and no pending permission), then re-warn at the same cadence so a long
+// stall keeps reminding the user. Checked on a coarser interval.
+export const STALL_WARN_MS = 60_000;
+const STALL_TICK_MS = 15_000;
+
+// Build the stall-notice text (pure, unit-tested). Names the in-flight tool when
+// known so the user can judge whether it's plausibly stuck.
+export function stallNoticeText(elapsedMs: number, toolName?: string): string {
+  const secs = Math.round(elapsedMs / 1000);
+  const what = toolName ? `Tool ${toolName}` : 'A tool';
+  return `${what} has been running ${secs}s with no result yet — it may be stuck. Tap Abort to cancel and try again.`;
+}
+
+// Decide whether the watchdog should warn (pure, unit-tested). Only warns when a
+// turn is genuinely stuck: busy, awaiting a tool result (not the user's
+// permission tap, not just mid-thought), silent past `warnMs`, and not warned
+// again within `warnMs`. `warnMs <= 0` disables warnings entirely.
+export function shouldWarnStall(opts: {
+  busy: boolean;
+  pendingPermissions: number;
+  pendingTools: number;
+  idleMs: number;
+  sinceLastNoticeMs: number;
+  warnMs: number;
+}): boolean {
+  if (opts.warnMs <= 0) return false;
+  if (!opts.busy) return false;
+  if (opts.pendingPermissions > 0) return false;
+  if (opts.pendingTools === 0) return false;
+  if (opts.idleMs < opts.warnMs) return false;
+  if (opts.sinceLastNoticeMs < opts.warnMs) return false;
+  return true;
+}
+
 // Map our wire mode to the SDK permission mode (pure, unit-tested).
 export type SdkPermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 export function mapSessionModeToPermissionMode(mode: SessionMode): SdkPermissionMode {
@@ -136,6 +171,7 @@ export interface ClaudeEngineConfig {
   resumeSessionAt?: string; // resume history only up to this user-message uuid (rewind)
   model?: string; // the model to run (from the catalog default or --model)
   models?: ModelOption[]; // the /model picker list (from the catalog)
+  stallWarnMs?: number; // stall-watchdog threshold (--stall-warn); undefined = default, 0 = off
 }
 
 export class ClaudeEngine implements AgentEngine {
@@ -160,9 +196,20 @@ export class ClaudeEngine implements AgentEngine {
   private deltaTimer?: ReturnType<typeof setTimeout>;
   private readonly toolNames = new Map<string, string>(); // tool_use id → name, for tool_output labels/suppression
   private readonly runningAgents = new Map<string, { name: string; description?: string }>(); // live Task subagents
+  // Stall watchdog: while a turn is running we expect SDK messages to keep
+  // arriving; a long silence usually means a tool call is hung (commonly an MCP
+  // server that never returns — MCP_TOOL_TIMEOUT is the hard backstop, but it's
+  // minutes away). The watchdog surfaces a non-destructive notice so the user can
+  // tell "stuck" from "slow" and Abort by hand, instead of staring at the timer.
+  private readonly pendingTools = new Map<string, string>(); // in-flight tool_use id → name (awaiting its result)
+  private lastSdkMsgAt = 0; // Date.now() of the last SDK message this turn
+  private lastStallNoticeAt = 0; // Date.now() of the last stall notice (rate-limits re-warns)
+  private stallTimer?: ReturnType<typeof setInterval>;
+  private readonly stallWarnMs: number; // 0 = watchdog disabled
 
   constructor(private readonly config: ClaudeEngineConfig) {
     this.currentModel = config.model; // show it on the status line before init echoes it
+    this.stallWarnMs = config.stallWarnMs ?? STALL_WARN_MS;
   }
 
   onOutput(handler: EngineOutputHandler): void {
@@ -245,10 +292,12 @@ export class ClaudeEngine implements AgentEngine {
         ...(this.config.resumeSessionAt ? { resumeSessionAt: this.config.resumeSessionAt } : {}),
       },
     });
+    this.armStallWatchdog();
     try {
       for await (const message of this.stream) {
         const msg = message as unknown as SdkMessageLike;
         log('sdk.msg', { type: msg.type, subtype: msg.subtype, live: this.liveStarted });
+        this.noteActivity(msg); // feed the stall watchdog
         // Emit raw message for terminal tracking (only live messages matter)
         if (this.liveStarted) this.rawHandler(msg);
         this.trackRewindPoint(msg);
@@ -305,6 +354,7 @@ export class ClaudeEngine implements AgentEngine {
       throw err;
     } finally {
       this.flushDelta();
+      this.disarmStallWatchdog();
       log('engine.stream_end', { closed: this.closed });
     }
     // The SDK output stream ended normally without a stop() — the CLI query
@@ -384,8 +434,67 @@ export class ClaudeEngine implements AgentEngine {
     // the tool-call await so the turn can finalize and the SDK move on.
     for (const resolve of this.permResolvers.values()) resolve({ decision: 'deny' });
     this.permResolvers.clear();
+    this.pendingTools.clear(); // a stuck tool's result never arrives; don't carry it forward
+    this.lastStallNoticeAt = 0;
     this.state = 'idle';
     this.emitStatus();
+  }
+
+  // Start the per-engine stall watchdog (idempotent). Runs for the engine's
+  // lifetime; checkStall() gates on whether a turn is actually busy, so the idle
+  // gaps between turns never trip it. .unref() so it can't keep the process alive.
+  private armStallWatchdog(): void {
+    if (this.stallTimer || this.stallWarnMs <= 0) return; // 0 = disabled
+    this.lastSdkMsgAt = Date.now();
+    // Tick at most every STALL_TICK_MS, but finer for a short threshold so a small
+    // --stall-warn still fires promptly (and never below 1s).
+    const tick = Math.max(1_000, Math.min(STALL_TICK_MS, this.stallWarnMs));
+    this.stallTimer = setInterval(() => this.checkStall(), tick);
+    this.stallTimer.unref?.();
+  }
+
+  private disarmStallWatchdog(): void {
+    if (this.stallTimer) {
+      clearInterval(this.stallTimer);
+      this.stallTimer = undefined;
+    }
+  }
+
+  // Record a fresh SDK message: it resets the stall clock, and adds/removes
+  // in-flight tool calls so a stall notice can name what we're waiting on.
+  private noteActivity(msg: SdkMessageLike): void {
+    this.lastSdkMsgAt = Date.now();
+    this.lastStallNoticeAt = 0; // progress resumed → allow an immediate warn if it stalls again
+    if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
+      for (const b of msg.message.content) {
+        if (b.type === 'tool_use' && typeof b.id === 'string' && typeof b.name === 'string') {
+          this.pendingTools.set(b.id, b.name);
+        }
+      }
+    }
+    for (const id of toolResultIds(msg)) this.pendingTools.delete(id);
+  }
+
+  // Fired on a timer: if a turn is genuinely stuck (busy, a tool in flight, no
+  // SDK message for a while, and not just waiting on the user's permission tap),
+  // surface a non-destructive notice. Re-warns at STALL_WARN_MS cadence. The hard
+  // MCP_TOOL_TIMEOUT remains the backstop that actually unblocks the turn.
+  private checkStall(): void {
+    const now = Date.now();
+    const idle = now - this.lastSdkMsgAt;
+    const warn = shouldWarnStall({
+      busy: this.state === 'thinking',
+      pendingPermissions: this.permResolvers.size,
+      pendingTools: this.pendingTools.size,
+      idleMs: idle,
+      sinceLastNoticeMs: now - this.lastStallNoticeAt,
+      warnMs: this.stallWarnMs,
+    });
+    if (!warn) return;
+    this.lastStallNoticeAt = now;
+    const toolName = [...this.pendingTools.values()].pop();
+    log('stall.warn', { idleMs: idle, tool: toolName, pending: this.pendingTools.size });
+    this.handler({ type: 'notice', kind: 'info', text: stallNoticeText(idle, toolName) });
   }
 
   // Empty the subagent tree (turn interrupted/ended) so it never sticks.
